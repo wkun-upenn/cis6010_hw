@@ -1,6 +1,22 @@
-// TODO: before you submit on Canvas, include here:
-//   1) which GPU you used and
-//   2) what performance improvement you obtained over previous homework(s)
+/*TODO: before you submit on Canvas, include here:
+     1) GPU Using: GeForce RTX 2060
+     2) Final performance: Average elapsed time: (0.050167) s, performance: ( 342.45) GFLOPS. size: (2048).
+        In Homework 1, even though I fixed coalesced memory access, the performance was still low. I followed the
+        instruction in transpose.cu and used a shared memory bank but still the performance was lower than expected in 
+        homework 1 hint. Here are the specification of my GPU:
+        
+            Name: NVIDIA GeForce RTX 2060
+            Compute capability: 7.5
+            MultiProcessor (SM) count: 30
+            Warp size: 32
+            Max threads per block: 1024
+            Max threads per SM: 1024
+            Max threads dim: (1024, 1024, 64)
+            Max grid size:   (2147483647, 65535, 65535)
+
+        From Nsight Compute, I located the Global Load & Store Sectors/Request (ld) for coalesced implementation and the value is 4.0, in comparison
+        the value for uncoalesced implementation is 16.5. So I believe the memory access is coalesced.
+*/
 
 #include <cassert>
 #include <cstdio>
@@ -64,6 +80,10 @@ const std::string errLogFile = "gemmValidationFailure.txt";
 // NB: must use a single generator to avoid duplicates
 std::default_random_engine generator(2);
 std::uniform_real_distribution<float> distribution(0, 1);
+
+// Variables defined while completing homework questions
+const int TILE_N     = 64;  // columns per block
+const int BLOCK_ROWS = 16;   // rows per block
 
 int main(int argc, char **argv)
 {
@@ -349,6 +369,48 @@ __global__ void runGmemCoalesced(int M, int N, int K, float alpha, float *A, flo
     // HW1 TODO: copy runBasic() code here and update to avoid uncoalesced accesses to global memory.
     // Note, you are also free to change the grid dimensions in the kernel launch below.
 
+    // Create a shared memory to hold input tiles
+    __shared__ float As[BLOCK_ROWS][TILE_N + 1];
+    __shared__ float Bs[TILE_N][TILE_N + 1];
+
+    const int col = blockIdx.x * TILE_N     + threadIdx.x;
+    const int row = blockIdx.y * BLOCK_ROWS + threadIdx.y;
+    if (row >= M || col >= N) return;
+
+    float acc = 0;
+
+    // Tile K in chunks of TILE_N
+    for (int k0 = 0; k0 < K; k0 += TILE_N) {
+        // Threads to load multiple rows of A and B
+        int aCol = k0 + threadIdx.x;
+        if (aCol < K) {
+            As[threadIdx.y][threadIdx.x] = A[row * K + aCol];
+        } else {
+            As[threadIdx.y][threadIdx.x] = 0;
+        }
+
+        for (int kk = threadIdx.y; kk < TILE_N; kk += BLOCK_ROWS) {
+            int bRow = k0 + kk;
+            if (bRow < K) {
+                Bs[kk][threadIdx.x] = B[bRow * N + col];
+            } else {
+                Bs[kk][threadIdx.x] = 0;
+            }
+        }
+
+        __syncthreads();
+
+        // Compute partial product
+        for (int k = 0; k < TILE_N; ++k) {
+            acc += As[threadIdx.y][k] * Bs[k][threadIdx.x];
+        }
+
+        __syncthreads();
+    }
+
+    // Write back
+    const int idx = row * N + col;
+    C[idx] = alpha * acc + beta * C[idx];
 }
 
 const uint F = 32;
@@ -403,9 +465,11 @@ void runAlgo(Algo algo, cublasHandle_t handle, int M, int N, int K, float alpha,
     }
     case gmem_coalesced:
     {
-        dim3 gridDim(ROUND_UP_TO_NEAREST(M, 32), ROUND_UP_TO_NEAREST(N, 32));
-        dim3 blockDim(32, 32);
-        runGmemCoalesced<<<gridDim, blockDim>>>(M, N, K, alpha, A, B, beta, C);
+        dim3 threads(TILE_N, BLOCK_ROWS);
+        dim3 blocks((N + TILE_N     - 1) / TILE_N,
+                    (M + BLOCK_ROWS - 1) / BLOCK_ROWS);
+
+        runGmemCoalesced<<<blocks, threads>>>(M, N, K, alpha, A, B, beta, C);
         break;
     }
     case smem:

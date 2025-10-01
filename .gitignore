@@ -283,3 +283,8 @@ __pycache__/
 # Cake - Uncomment if you are using it
 # tools/**
 # !tools/packages.config
+*.bin
+*.ncu-rep
+*.txt
+.vscode/
+device_info.cu
